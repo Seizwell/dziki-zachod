@@ -80,10 +80,10 @@ int main(int argc, char** argv) {
     // ─── Zmienne lokalne ────────────────────────────────────────
     State state = REST;
     int clk = 0, my_prio = 0, ack_cnt = 0, rounds = 0;
-    std::vector<int> waitQ;
-    int cand = -1, partner = -1;
-    int wait_ticks = 0;  // timeout na IN_SALOON_WAITING
-    const int WAIT_TIMEOUT = 2000; // ~10s przy 50us/tick
+    std::vector<int> waitQ;    // procesy czekające na nasz ACK
+    int cand = -1;              // komu wysłaliśmy PROPOSE (-1 = nikomu)
+    int partner = -1;           // z kim walczymy
+    bool sent_prop = false;     // czy wysłaliśmy PROPOSE do kandydata
 
     MPI_Barrier(MPI_COMM_WORLD);
     if (!rank) {
@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
 
     auto start_round = [&]() {
         clk++; my_prio = clk; ack_cnt = 0;
-        cand = partner = -1; wait_ticks = 0;
+        cand = -1; partner = -1; sent_prop = false;
         waitQ.clear();
         state = WAIT_SALOON;
         plog(rank, SN[state], "Runda %d → REQ(prio=%d)", rounds+1, my_prio);
@@ -127,10 +127,13 @@ int main(int argc, char** argv) {
             clk = std::max(clk, m.prio) + 1;
 
             switch (state) {
+
+            // ── REST ──
             case REST:
                 if (mt == MREQ) send_to(j, MACK, rank, 0, m.prio);
                 break;
 
+            // ── WAIT_SALOON ──
             case WAIT_SALOON:
                 if (mt == MREQ) {
                     if (std::make_pair(m.prio, j) < std::make_pair(my_prio, rank))
@@ -149,70 +152,111 @@ int main(int argc, char** argv) {
                 }
                 break;
 
+            // ── IN_SALOON_FREE ──
             case IN_SALOON_FREE:
                 if (mt == MREQ) {
+                    // Zawsze ACK — jesteśmy w salonie, nie blokujemy innych
                     send_to(j, MACK, rank, 0, m.prio);
                 }
-                else if (mt == MLOOK && rank > j) {
-                    cand = j;
-                    send_to(j, MPROP, rank, 0, 0);
-                    state = IN_SALOON_WAITING;
-                    wait_ticks = 0;
-                    plog(rank, SN[state], "LOOK od P%d → PROP", j);
+                else if (mt == MLOOK) {
+                    if (rank > j && cand == -1) {
+                        // Wyższy ID, wolni → proponujemy
+                        cand = j;
+                        sent_prop = true;
+                        send_to(j, MPROP, rank, 0, 0);
+                        state = IN_SALOON_WAITING;
+                        plog(rank, SN[state], "LOOK od P%d → PROP", j);
+                    }
+                    // niższy ID czeka na PROP od wyższego
+                    // (ale jeśli dostaniemy PROP — akceptujemy poniżej)
                 }
                 else if (mt == MPROP) {
+                    // Ktoś chce z nami walczyć — akceptuj!
                     partner = j;
                     send_to(j, MACC, rank, 0, 0);
+                    // Jeśli sami mieliśmy kandydata — anuluj
+                    if (cand != -1 && cand != j) {
+                        // Nie musimy nic robić — PROP do cand może
+                        // przyjść jako REJ albo po prostu zostanie zignorowany
+                    }
+                    cand = -1;
+                    sent_prop = false;
                     flush();
                     state = FIGHTING;
-                    plog(rank, SN[state], "PROP od P%d → ACC ⚔️", j);
+                    plog(rank, SN[state], "PROP od P%d → ACC! ⚔️", j);
                 }
                 break;
 
+            // ── IN_SALOON_WAITING ──
             case IN_SALOON_WAITING:
                 if (mt == MREQ) {
                     send_to(j, MACK, rank, 0, m.prio);
                 }
                 else if (mt == MACC && cand == j) {
+                    // Nasz kandydat zaakceptował!
                     partner = j;
                     flush();
                     state = FIGHTING;
                     plog(rank, SN[state], "ACC od P%d → ⚔️", j);
                 }
                 else if (mt == MREJ && cand == j) {
+                    // Kandydat odrzucił — szukamy dalej
                     cand = -1;
+                    sent_prop = false;
                     state = IN_SALOON_FREE;
                     plog(rank, SN[state], "REJ od P%d → szukam", j);
                     bcast(N, rank, MLOOK, 0, 0);
                 }
                 else if (mt == MPROP) {
-                    send_to(j, MREJ, rank, 0, 0);
-                    plog(rank, SN[state], "PROP od P%d → REJ", j);
+                    if (!sent_prop) {
+                        // Nie wysłaliśmy jeszcze PROP — nie powinniśmy tu być,
+                        // ale na wszelki wypadek: akceptuj
+                        partner = j;
+                        send_to(j, MACC, rank, 0, 0);
+                        cand = -1;
+                        flush();
+                        state = FIGHTING;
+                        plog(rank, SN[state], "PROP od P%d → ACC (unexpected) ⚔️", j);
+                    } else if (j == cand) {
+                        // Cross-proposal! Oboje wysłaliśmy sobie PROP.
+                        // Niższy ID akceptuje, wyższy dostaje ACC.
+                        if (rank < j) {
+                            // My mamy niższy ID → my akceptujemy
+                            partner = j;
+                            send_to(j, MACC, rank, 0, 0);
+                            cand = -1;
+                            sent_prop = false;
+                            flush();
+                            state = FIGHTING;
+                            plog(rank, SN[state], "Cross-prop z P%d → ACC! ⚔️", j);
+                        } else {
+                            // My mamy wyższy ID → czekamy na ACC od nich
+                            // (oni dostali nasz PROP i powinni zaakceptować)
+                            plog(rank, SN[state], "Cross-prop z P%d → czekam na ACC", j);
+                        }
+                    } else {
+                        // Jesteśmy zajęci z kimś innym
+                        send_to(j, MREJ, rank, 0, 0);
+                        plog(rank, SN[state], "PROP od P%d → REJ (cand=P%d)", j, cand);
+                    }
                 }
                 break;
 
+            // ── FIGHTING ──
             case FIGHTING:
-                if (mt == MREQ) waitQ.push_back(j);
-                else if (mt == MPROP) send_to(j, MREJ, rank, 0, 0);
+                if (mt == MREQ) {
+                    waitQ.push_back(j);  // wyślemy ACK po walce
+                }
+                else if (mt == MPROP) {
+                    send_to(j, MREJ, rank, 0, 0);
+                }
                 break;
             }
         }
 
-        // ── Timeout na IN_SALOON_WAITING ──
-        if (state == IN_SALOON_WAITING) {
-            wait_ticks++;
-            if (wait_ticks >= WAIT_TIMEOUT) {
-                plog(rank, SN[IN_SALOON_FREE], "Timeout! P%d nie odpowiada → szukam", cand);
-                cand = -1;
-                state = IN_SALOON_FREE;
-                wait_ticks = 0;
-                bcast(N, rank, MLOOK, 0, 0);
-            }
-        }
-
-        // ── FIGHTING: kończymy ──
+        // ── FIGHTING: kończymy walkę ──
         if (state == FIGHTING) {
-            usleep(15000);
+            usleep(10000); // 10ms "walka"
             int w = std::max(rank, partner);
             plog(rank, SN[state], w == rank ? "🏆 WYGRAŁEM z P%d!" : "🏥 Przegrałem z P%d...", partner);
             rounds++;
@@ -221,6 +265,7 @@ int main(int argc, char** argv) {
             else plog(rank, "DONE", "🎉 Wszystkie %d rund!", max_rounds);
         }
 
+        // Krótka pauza jeśli pusto
         if (inbox.empty() && state != FIGHTING) usleep(50);
     }
 
