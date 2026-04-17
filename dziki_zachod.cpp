@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
     MPI_Barrier(MPI_COMM_WORLD);
     if (!rank) {
         fprintf(stderr, "\n%s═══════════════════════════════════════════════════%s\n", B, R);
-        fprintf(stderr, "%s  🤠 DZIKI ZACHÓD — OpenMPI%s\n", B, R);
+        fprintf(stderr, "%s  DZIKI ZACHÓD — OpenMPI%s\n", B, R);
         fprintf(stderr, "  N=%s%d%s | S=%s%d%s | Rundy=%s%d%s\n",
                 B,N,R, B,S,R, B,max_rounds,R);
         fprintf(stderr, "%s═══════════════════════════════════════════════════%s\n", B, R);
@@ -227,7 +227,7 @@ int main(int argc, char** argv) {
     MPI_Barrier(MPI_COMM_WORLD);
     if (!rank) {
         fprintf(stderr, "\n%s═══════════════════════════════════════════════════%s\n", B, R);
-        fprintf(stderr, "%s  ✅ Symulacja zakończona!%s\n", B, R);
+        fprintf(stderr, "%sSymulacja zakończona!%s\n", B, R);
         fprintf(stderr, "  N=%d, S=%d, Rundy=%d, Iteracje=%d\n", N, S, max_rounds, iter);
         fprintf(stderr, "%s═══════════════════════════════════════════════════%s\n", B, R);
     }
